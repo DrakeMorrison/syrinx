@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>micvis</title>
+<title>syrinx</title>
 <style>
   :root { --bg:#282828; --fg:#ebdbb2; --dim:#928374; --low:#b8bb26; --mid:#fabd2f; --high:#fb4934; }
   html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); overflow:hidden;
@@ -76,7 +76,7 @@ const THEMES = {
 };
 
 // ---------- settings ----------
-const LS = 'micvis.settings';
+const LS = 'syrinx.settings';
 const DEFAULTS = { mode:'columns', theme:'gruvbox', cell:14, gain:4, auto:true, device:'' };
 let S = { ...DEFAULTS };
 try { const raw = localStorage.getItem(LS); if (raw) S = { ...DEFAULTS, ...JSON.parse(raw) }; } catch (e) {}

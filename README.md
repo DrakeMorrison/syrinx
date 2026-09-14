@@ -1,6 +1,6 @@
-# micvis
+# syrinx
 
-A full-screen microphone visualizer that looks like [cliamp](https://github.com/bjarneo/cliamp)'s
+A full-screen microphone visualizer, named for the Greek pan flute whose graduated pipes look like a spectrum, that looks like [cliamp](https://github.com/bjarneo/cliamp)'s
 terminal visualizer. Single `index.html`, no dependencies, no build.
 
 ## Run
