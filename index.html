@@ -1,0 +1,602 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>micvis</title>
+<style>
+  :root { --bg:#282828; --fg:#ebdbb2; --dim:#928374; --low:#b8bb26; --mid:#fabd2f; --high:#fb4934; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); overflow:hidden;
+    font: 13px/1.5 "JetBrainsMono Nerd Font", "JetBrains Mono", "CaskaydiaMono Nerd Font", "DejaVu Sans Mono", ui-monospace, monospace; }
+  canvas { display:block; position:fixed; inset:0; cursor:none; }
+  body.ui-visible canvas { cursor:default; }
+  #ui { position:fixed; top:14px; left:14px; background:color-mix(in srgb, var(--bg) 82%, black); border:1px solid var(--dim);
+    padding:10px 12px; display:grid; grid-template-columns:auto 1fr; gap:6px 10px; align-items:center;
+    opacity:0; transition:opacity .25s; pointer-events:none; min-width:260px; }
+  body.ui-visible #ui { opacity:1; pointer-events:auto; }
+  #ui label { color:var(--dim); text-align:right; }
+  #ui select, #ui input[type=range], #ui button { width:100%; box-sizing:border-box; background:var(--bg); color:var(--fg);
+    border:1px solid var(--dim); font:inherit; padding:2px 4px; }
+  #ui input[type=range] { padding:0; accent-color:var(--mid); }
+  #ui .inline { display:flex; gap:8px; align-items:center; }
+  #ui .inline input[type=range] { flex:1; }
+  #ui .hint { grid-column:1 / -1; color:var(--dim); font-size:11px; margin-top:4px; }
+  #gate { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px;
+    background:color-mix(in srgb, var(--bg) 70%, black); }
+  #gate.hidden { display:none; }
+  #gate button { font:inherit; font-size:18px; padding:12px 26px; background:var(--bg); color:var(--low); border:2px solid var(--low); cursor:pointer; }
+  #gate button:hover { background:var(--low); color:var(--bg); }
+  #gate button.secondary { font-size:14px; padding:8px 18px; color:var(--dim); border-color:var(--dim); }
+  #gate button.secondary:hover { background:var(--dim); color:var(--bg); }
+  #gate p { color:var(--dim); margin:0; max-width:46ch; text-align:center; }
+  #err { color:var(--high); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="ui">
+  <label for="mode">mode</label><select id="mode"></select>
+  <label for="theme">theme</label><select id="theme"></select>
+  <label for="device">input</label><select id="device"><option value="">default microphone</option></select>
+  <label for="gain">gain</label>
+  <div class="inline"><input type="range" id="gain" min="-1" max="2" step="0.01"><span id="gainv">4.0×</span>
+    <label style="text-align:left"><input type="checkbox" id="auto"> auto</label></div>
+  <label for="cell">cell</label>
+  <div class="inline"><input type="range" id="cell" min="6" max="48" step="1"><span id="cellv"></span></div>
+  <label></label><button id="fs">fullscreen</button>
+  <div class="hint">← → mode · t theme · - = gain · [ ] cell · f fullscreen · h hide panel</div>
+</div>
+
+<div id="gate">
+  <button id="start">start microphone</button>
+  <p>Mic audio never leaves this page. Echo cancellation, noise suppression and auto gain are turned off so the spectrum is honest.</p>
+  <button id="demo" class="secondary">demo signal (no mic)</button>
+  <p id="err"></p>
+</div>
+
+<script>
+'use strict';
+const $ = s => document.querySelector(s);
+const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+
+// ---------- themes: bg / fg / dim / spectrum low, mid, high (green, yellow, red) ----------
+const THEMES = {
+  gruvbox:       { bg:'#282828', fg:'#ebdbb2', dim:'#928374', low:'#b8bb26', mid:'#fabd2f', high:'#fb4934' },
+  'tokyo-night': { bg:'#1a1b26', fg:'#c0caf5', dim:'#565f89', low:'#9ece6a', mid:'#e0af68', high:'#f7768e' },
+  catppuccin:    { bg:'#1e1e2e', fg:'#cdd6f4', dim:'#6c7086', low:'#a6e3a1', mid:'#f9e2af', high:'#f38ba8' },
+  dracula:       { bg:'#282a36', fg:'#f8f8f2', dim:'#6272a4', low:'#50fa7b', mid:'#f1fa8c', high:'#ff5555' },
+  nord:          { bg:'#2e3440', fg:'#d8dee9', dim:'#4c566a', low:'#a3be8c', mid:'#ebcb8b', high:'#bf616a' },
+  'rose-pine':   { bg:'#191724', fg:'#e0def4', dim:'#6e6a86', low:'#9ccfd8', mid:'#f6c177', high:'#eb6f92' },
+  kanagawa:      { bg:'#1f1f28', fg:'#dcd7ba', dim:'#727169', low:'#98bb6c', mid:'#e6c384', high:'#c34043' },
+  everforest:    { bg:'#2d353b', fg:'#d3c6aa', dim:'#859289', low:'#a7c080', mid:'#dbbc7f', high:'#e67e80' },
+  'matte-black': { bg:'#121212', fg:'#bebebe', dim:'#6e6e6e', low:'#a1a1a1', mid:'#f1c40f', high:'#f38ba8' },
+  winamp:        { bg:'#000000', fg:'#00ff00', dim:'#3c6e3c', low:'#00ff00', mid:'#ffff00', high:'#ff0000' },
+  vantablack:    { bg:'#000000', fg:'#e0e0e0', dim:'#555555', low:'#ffffff', mid:'#bdbdbd', high:'#ff2a2a' },
+};
+
+// ---------- settings ----------
+const LS = 'micvis.settings';
+const DEFAULTS = { mode:'columns', theme:'gruvbox', cell:14, gain:4, auto:true, device:'' };
+let S = { ...DEFAULTS };
+try { const raw = localStorage.getItem(LS); if (raw) S = { ...DEFAULTS, ...JSON.parse(raw) }; } catch (e) {}
+function save() { try { localStorage.setItem(LS, JSON.stringify(S)); } catch (e) {} }
+
+// ---------- spectrum analysis, ported from cliamp's ui/visualizer.go ----------
+const LEGACY_EDGES = [20, 100, 200, 400, 800, 1600, 3200, 6400, 12800, 16000, 20000];
+const TICK_ANALYZE = 33;           // ms, ~30 Hz FFT cadence
+const MAX_SMOOTH_DT = 10 * 0.016;  // s
+const RISE_RATE = 34, FALL_RATE = 10;
+
+function buildEdges(count) {
+  const edges = new Float64Array(count + 1);
+  const lastAnchor = LEGACY_EDGES.length - 1;
+  for (let i = 0; i <= count; i++) {
+    const num = i * lastAnchor, idx = Math.floor(num / count);
+    if (idx >= lastAnchor) { edges[i] = LEGACY_EDGES[lastAnchor]; continue; }
+    if (num % count === 0) { edges[i] = LEGACY_EDGES[idx]; continue; }
+    const frac = (num % count) / count, lo = LEGACY_EDGES[idx], hi = LEGACY_EDGES[idx + 1];
+    edges[i] = Math.pow(10, Math.log10(lo) * (1 - frac) + Math.log10(hi) * frac);
+  }
+  return edges;
+}
+
+function sampleLinear(arr, pos) {
+  const n = arr.length;
+  if (n === 0) return 0; if (n === 1) return arr[0];
+  if (pos <= 0) return arr[0];
+  const last = n - 1; if (pos >= last) return arr[last];
+  const i = Math.floor(pos), f = pos - i;
+  return arr[i] * (1 - f) + arr[i + 1] * f;
+}
+function resampleLinear(bands, total) {
+  if (total <= 0 || bands.length === 0) return [];
+  if (bands.length === total) return Array.from(bands);
+  const out = new Array(total);
+  if (total === 1) { out[0] = sampleLinear(bands, (bands.length - 1) / 2); return out; }
+  const last = bands.length - 1;
+  for (let c = 0; c < total; c++) out[c] = sampleLinear(bands, c / (total - 1) * last);
+  return out;
+}
+function averageRange(mags, lo, hi) {
+  const minPos = 1, maxPos = mags.length - 1;
+  lo = clamp(lo, minPos, maxPos); hi = clamp(hi, lo, maxPos);
+  const span = hi - lo;
+  if (span <= 0) return sampleLinear(mags, lo);
+  const n = clamp(Math.ceil(span * 2), 4, 32);
+  let sum = 0;
+  for (let i = 0; i < n; i++) sum += sampleLinear(mags, lo + ((i + 0.5) / n) * span);
+  return sum / n;
+}
+
+class FFT {
+  constructor(n) {
+    this.n = n;
+    const bits = Math.log2(n);
+    this.rev = new Uint32Array(n);
+    for (let i = 0; i < n; i++) { let r = 0, x = i; for (let b = 0; b < bits; b++) { r = (r << 1) | (x & 1); x >>= 1; } this.rev[i] = r; }
+    this.cos = new Float64Array(n / 2); this.sin = new Float64Array(n / 2);
+    for (let i = 0; i < n / 2; i++) { const a = -2 * Math.PI * i / n; this.cos[i] = Math.cos(a); this.sin[i] = Math.sin(a); }
+    this.win = new Float64Array(n);
+    for (let i = 0; i < n; i++) this.win[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / (n - 1)));
+    this.re = new Float64Array(n); this.im = new Float64Array(n); this.pow = new Float64Array(n / 2);
+  }
+  power(samples, gain) {
+    const { n, re, im, rev, win, cos, sin } = this;
+    for (let i = 0; i < n; i++) { re[rev[i]] = i < samples.length ? samples[i] * gain * win[i] : 0; im[rev[i]] = 0; }
+    for (let size = 2; size <= n; size <<= 1) {
+      const half = size >> 1, step = n / size;
+      for (let start = 0; start < n; start += size) {
+        for (let k = 0; k < half; k++) {
+          const t = k * step, c = cos[t], s = sin[t], i1 = start + k, i2 = i1 + half;
+          const xr = re[i2] * c - im[i2] * s, xi = re[i2] * s + im[i2] * c;
+          re[i2] = re[i1] - xr; im[i2] = im[i1] - xi; re[i1] += xr; im[i1] += xi;
+        }
+      }
+    }
+    const p = this.pow; p[0] = 0;
+    for (let i = 1; i < n / 2; i++) p[i] = re[i] * re[i] + im[i] * im[i];
+    return p;
+  }
+}
+
+const audio = { ctx: null, analyser: null, stream: null, source: null, demo: null, buf: null, started: false };
+const ffts = {}, edges = {}, prev = {}, smooth = {}, results = {};
+let wave = new Float32Array(2048);
+let lastAnalyze = 0, lastSmooth = 0;
+
+function readSamples(fftSize) {
+  const a = audio.analyser;
+  if (a.fftSize !== fftSize) a.fftSize = fftSize;
+  if (!audio.buf || audio.buf.length !== fftSize) audio.buf = new Float32Array(fftSize);
+  a.getFloatTimeDomainData(audio.buf);
+  return audio.buf;
+}
+
+// Returns band levels in [0,1] with cliamp's attack/decay applied; caches per (bandCount, fftSize).
+function analyze(bandCount, fftSize) {
+  const samples = readSamples(fftSize);
+  wave = samples;
+  if (bandCount <= 0) return null;
+  const key = bandCount + 'x' + fftSize;
+  const pv = prev[key] || (prev[key] = new Float64Array(bandCount));
+  const out = results[key] || (results[key] = new Float64Array(bandCount));
+  let maxAbs = 0;
+  for (let i = 0; i < samples.length; i++) { const a = Math.abs(samples[i]); if (a > maxAbs) maxAbs = a; }
+  if (maxAbs * S.gain < 1e-5) { for (let b = 0; b < bandCount; b++) pv[b] = out[b] = pv[b] * 0.8; return out; }
+
+  const fft = ffts[fftSize] || (ffts[fftSize] = new FFT(fftSize));
+  const powers = fft.power(samples, S.gain);
+  const ed = edges[bandCount] || (edges[bandCount] = buildEdges(bandCount));
+  const binHz = audio.ctx.sampleRate / fftSize;
+  let peak = 0;
+  for (let b = 0; b < bandCount; b++) {
+    const sum = averageRange(powers, ed[b] / binHz, ed[b + 1] / binHz);
+    let v = sum > 0 ? (10 * Math.log10(sum) + 10) / 50 : 0;
+    v = clamp(v, 0, 1);
+    if (v > peak) peak = v;
+    v = v > pv[b] ? v * 0.6 + pv[b] * 0.4 : v * 0.25 + pv[b] * 0.75;   // fast attack, slow decay
+    pv[b] = out[b] = v;
+  }
+  if (S.auto) {   // slow automatic gain: keep the loudest band near the top without pinning it there
+    if (peak > 0.97) S.gain *= 0.96; else if (peak < 0.7) S.gain *= 1.01;
+    S.gain = clamp(S.gain, 0.1, 100);
+    syncGainUI();
+  }
+  return out;
+}
+
+function step(cur, target, dt) {
+  const rate = target > cur ? RISE_RATE : FALL_RATE;
+  return cur + (target - cur) * (1 - Math.exp(-rate * dt));
+}
+function smoothed(key, target, dt) {
+  let s = smooth[key];
+  if (!s || s.length !== target.length) { s = smooth[key] = Float64Array.from(target); return s; }
+  if (dt > 0) for (let i = 0; i < s.length; i++) s[i] = step(s[i], target[i], dt);
+  return s;
+}
+
+// ---------- terminal cell grid and drawing primitives ----------
+const canvas = $('#c'), ctx = canvas.getContext('2d', { alpha: false });
+const G = { cols: 0, rows: 0, cw: 0, ch: 0, ox: 0, oy: 0, w: 0, h: 0 };
+let COL = ['#b8bb26', '#fabd2f', '#fb4934'];
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  G.w = window.innerWidth; G.h = window.innerHeight;
+  canvas.width = Math.round(G.w * dpr); canvas.height = Math.round(G.h * dpr);
+  canvas.style.width = G.w + 'px'; canvas.style.height = G.h + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  G.cw = Math.max(3, Math.round(S.cell * 0.6));
+  G.ch = Math.max(6, Math.round(S.cell * 1.25));
+  const pad = Math.round(G.cw * 2);
+  G.cols = Math.max(10, Math.floor((G.w - 2 * pad) / G.cw));
+  G.rows = Math.max(3, Math.floor((G.h - 2 * pad) / G.ch));
+  G.ox = Math.round((G.w - G.cols * G.cw) / 2);
+  G.oy = Math.round((G.h - G.rows * G.ch) / 2);
+  $('#cellv').textContent = G.cols + '×' + G.rows;
+}
+
+const tagOf = rowBottom => rowBottom >= 0.6 ? 2 : rowBottom >= 0.3 ? 1 : 0;
+
+// cliamp's visBandWidth: share PanelWidth across bands leaving 1-cell gaps.
+function bandWidths(total, width) {
+  const visible = Math.min(total, width);
+  const gaps = Math.min(visible - 1, Math.max(0, width - visible));
+  const bandCols = width - gaps, base = Math.floor(bandCols / visible), extra = bandCols % visible;
+  const out = new Array(total).fill(0);
+  for (let b = 0; b < visible; b++) out[b] = b < extra ? base + 1 : base;
+  return out;
+}
+function interpolateColumns(bands, widths) {
+  const out = []; let offset = 0;
+  for (let b = 0; b < bands.length; b++) {
+    const w = widths[b]; if (w <= 0) continue;
+    const next = b + 1 < bands.length ? bands[b + 1] : bands[b];
+    for (let c = 0; c < w; c++) { const t = c / w; out[offset + c] = bands[b] * (1 - t) + next * t; }
+    offset += w;
+  }
+  return out;
+}
+
+// fracBlock: full cell if level >= rowTop, else one of 8 partial block heights, else empty.
+function blockFrac(level, rb, rt) {
+  if (level >= rt) return 1;
+  if (level > rb) return Math.floor((level - rb) / (rt - rb) * 8) / 8;
+  return 0;
+}
+// Quantised fill height in cells: whole rows plus an eighth-block partial, like fracBlock per row.
+function fillCells(level) {
+  if (level <= 0) return 0;
+  if (level >= 1) return G.rows;
+  const raw = level * G.rows, full = Math.floor(raw);
+  return full + Math.floor((raw - full) * 8) / 8;
+}
+// One rect per colour zone (rows are green below 0.3, yellow below 0.6, red above) with integer edges: no seams.
+function drawColumn(col, level, width = 1, inset = 0) {
+  const cells = fillCells(level); if (cells <= 0) return;
+  const x = Math.round(G.ox + col * G.cw + inset), w = Math.round(width * G.cw - 2 * inset);
+  const bottom = G.oy + G.rows * G.ch;
+  const zoneTop = [Math.ceil(0.3 * G.rows), Math.ceil(0.6 * G.rows), G.rows];   // zone k covers rows [zoneTop[k-1], zoneTop[k]) counted from the bottom
+  let lo = 0;
+  for (let k = 0; k < 3; k++) {
+    const hi = Math.min(zoneTop[k], cells);
+    if (hi > lo) {
+      const y0 = Math.round(bottom - hi * G.ch), y1 = Math.round(bottom - lo * G.ch);
+      ctx.fillStyle = COL[k]; ctx.fillRect(x, y0, w, y1 - y0);
+    }
+    lo = zoneTop[k];
+    if (cells <= lo) break;
+  }
+}
+// shadeBlock: █ ▓ ▒ ░ as alpha levels
+function drawShadeColumn(col, level) {
+  const x = G.ox + col * G.cw;
+  for (let row = G.rows - 1; row >= 0; row--) {
+    const rb = (G.rows - 1 - row) / G.rows, rt = (G.rows - row) / G.rows;
+    if (level <= rb) break;
+    let a = 1;
+    if (level < rt) { const f = (level - rb) / (rt - rb); a = f >= 0.75 ? 0.8 : f >= 0.5 ? 0.55 : f >= 0.25 ? 0.3 : 0; }
+    if (a <= 0) continue;
+    ctx.globalAlpha = a; ctx.fillStyle = COL[tagOf(rb)];
+    ctx.fillRect(Math.round(x), Math.round(G.oy + row * G.ch), G.cw, Math.round(G.oy + (row + 1) * G.ch) - Math.round(G.oy + row * G.ch));
+  }
+  ctx.globalAlpha = 1;
+}
+// peak cap glyphs ⎺ ⎻ ⎼ ⎽ as a thin line at one of four heights within a cell
+function drawCap(col, row, glyph, color) {
+  const t = Math.max(1.5, G.ch / 12);
+  const y = G.oy + row * G.ch + (glyph + 0.5) / 4 * G.ch - t / 2;
+  ctx.fillStyle = color; ctx.fillRect(G.ox + col * G.cw, y, G.cw, t);
+}
+// braille dot at dot-grid coords (2 per cell horizontally, 4 vertically)
+function drawDot(dx, dy, color) {
+  const dw = G.cw / 2, dh = G.ch / 4, s = Math.max(1, Math.min(dw, dh) * 0.55);
+  ctx.fillStyle = color;
+  ctx.fillRect(G.ox + dx * dw + (dw - s) / 2, G.oy + dy * dh + (dh - s) / 2, s, s);
+}
+
+// ---------- modes ----------
+const MODES = {};
+
+MODES.columns = { name: 'Columns', bands: 10, fft: 2048,
+  render(bands) {
+    const widths = bandWidths(bands.length, G.cols), cols = interpolateColumns(bands, widths);
+    let x = 0, offset = 0;
+    for (let b = 0; b < bands.length; b++) {
+      for (let c = 0; c < widths[b]; c++) drawColumn(x++, cols[offset + c]);
+      offset += widths[b];
+      if (b < bands.length - 1) x++;
+    }
+  } };
+
+MODES.bars = { name: 'Bars', bands: 10, fft: 2048,
+  render(bands) {
+    const widths = bandWidths(bands.length, G.cols);
+    let x = 0;
+    for (let b = 0; b < bands.length; b++) { drawColumn(x, bands[b], widths[b]); x += widths[b] + 1; }
+  } };
+
+MODES.ascii = { name: 'Ascii', bands: 10, fft: 2048,
+  render(bands) {
+    const n = Math.floor((G.cols + 1) / 2), cols = resampleLinear(bands, n);
+    for (let i = 0; i < n; i++) drawShadeColumn(i * 2, cols[i]);
+  } };
+
+// ClassicPeak: 64-band analysis, 1-wide/1-gap columns, launched peak caps under gravity.
+MODES.peak = { name: 'ClassicPeak', bands: 64, fft: 4096, state: null,
+  reset() { this.state = null; },
+  render(bands, dt) {
+    const n = Math.floor((G.cols + 1) / 2), levels = resampleLinear(bands, n);
+    let st = this.state;
+    if (!st || st.bar.length !== n) {
+      st = this.state = { bar: Float64Array.from(levels), peak: Float64Array.from(levels), vel: new Float64Array(n),
+        hold: new Float64Array(n), attached: new Uint8Array(n).fill(1), apexed: new Uint8Array(n) };
+    }
+    const GRAV = 9.5, LAUNCH_BASE = 0.8, LAUNCH_GAIN = 1.4, LAUNCH_MAX = 1.7, APEX_HOLD = 0.08, EPS = 0.01;
+    for (let i = 0; i < n; i++) {
+      const target = levels[i], before = st.bar[i];
+      st.bar[i] = dt > 0 ? step(before, target, dt) : target;
+      if (st.attached[i]) {
+        if (st.bar[i] >= st.peak[i] - EPS) st.peak[i] = Math.max(st.peak[i], st.bar[i]);
+        else { st.attached[i] = 0; st.apexed[i] = 0; st.hold[i] = 0;
+          st.vel[i] = clamp(LAUNCH_BASE + LAUNCH_GAIN * (st.peak[i] - st.bar[i] + st.peak[i] * 0.5), LAUNCH_BASE, LAUNCH_MAX); }
+      } else if (dt > 0) {
+        if (st.hold[i] > 0) st.hold[i] -= dt;
+        else {
+          st.vel[i] -= GRAV * dt; st.peak[i] += st.vel[i] * dt;
+          if (st.vel[i] <= 0 && !st.apexed[i]) { st.apexed[i] = 1; st.hold[i] = APEX_HOLD; st.vel[i] = 0; }
+        }
+        if (st.peak[i] > 1) { st.peak[i] = 1; if (st.vel[i] > 0) st.vel[i] = 0; }
+        if (st.peak[i] <= st.bar[i]) { st.peak[i] = st.bar[i]; st.attached[i] = 1; st.vel[i] = 0; }
+      }
+      const col = i * 2, level = st.bar[i], pk = st.peak[i];
+      drawColumn(col, level);
+      const capRow = clamp(G.rows - 1 - Math.floor(pk * G.rows), 0, G.rows - 1);
+      const barTopRow = level > 0 ? G.rows - 1 - Math.floor(level * G.rows) : G.rows;
+      if (!st.attached[i] && capRow < barTopRow && pk > EPS) {
+        const rb = (G.rows - 1 - capRow) / G.rows, rt = (G.rows - capRow) / G.rows;
+        const glyph = 3 - clamp(Math.floor((pk - rb) / (rt - rb) * 4), 0, 3);
+        drawCap(col, capRow, glyph, COL[tagOf(rb)]);
+      }
+    }
+  } };
+
+// ClassicLED: Winamp 2.9 LED matrix, 2-wide bars, quantised rows, held then falling peak LEDs.
+MODES.led = { name: 'ClassicLED', bands: () => Math.max(1, Math.floor((G.cols + 1) / 3)), fft: 2048, state: null, acc: 0,
+  reset() { this.state = null; this.acc = 0; },
+  render(bands, dt) {
+    const n = bands.length;
+    let st = this.state;
+    if (!st || st.body.length !== n) st = this.state = { body: Float64Array.from(bands), peak: Float64Array.from(bands), hold: new Float64Array(n) };
+    this.acc += dt;
+    const FRAME = 1 / 30;
+    while (this.acc >= FRAME) {           // step at Winamp's ~30 FPS for the chunky feel
+      this.acc -= FRAME;
+      for (let i = 0; i < n; i++) {
+        const t = bands[i], rate = t > st.body[i] ? 60 : 16;
+        st.body[i] += (t - st.body[i]) * (1 - Math.exp(-rate * FRAME));
+        if (st.body[i] >= st.peak[i]) { st.peak[i] = st.body[i]; st.hold[i] = 0.45; }
+        else if (st.hold[i] > 0) st.hold[i] -= FRAME;
+        else st.peak[i] = Math.max(st.body[i], st.peak[i] - 0.55 * FRAME);
+      }
+    }
+    const inx = Math.max(1, G.cw * 0.12), iny = Math.max(1, G.ch * 0.18);
+    for (let i = 0; i < n; i++) {
+      const x = G.ox + i * 3 * G.cw + inx, w = 2 * G.cw - 2 * inx;
+      const lit = Math.round(st.body[i] * G.rows), pk = Math.round(st.peak[i] * G.rows) - 1;
+      for (let r = 0; r < lit; r++) {
+        ctx.fillStyle = COL[tagOf(r / G.rows)];
+        ctx.fillRect(x, G.oy + (G.rows - 1 - r) * G.ch + iny, w, G.ch - 2 * iny);
+      }
+      if (pk >= lit && pk < G.rows) {
+        ctx.fillStyle = COL[tagOf(pk / G.rows)];
+        ctx.fillRect(x, G.oy + (G.rows - 1 - pk) * G.ch + iny, w, G.ch - 2 * iny);
+      }
+    }
+  } };
+
+// Wave: braille oscilloscope of the raw samples.
+MODES.wave = { name: 'Wave', bands: 0, fft: 2048,
+  render() {
+    const DW = G.cols * 2, DH = G.rows * 4, mid = DH / 2, amp = DH / 2 * 0.92;
+    const n = wave.length, g = S.gain;
+    let prevY = null;
+    for (let x = 0; x < DW; x++) {
+      const i0 = Math.floor(x / DW * n), i1 = Math.max(i0 + 1, Math.floor((x + 1) / DW * n));
+      let lo = Infinity, hi = -Infinity;
+      for (let i = i0; i < i1 && i < n; i++) { const s = clamp(wave[i] * g, -1, 1); if (s < lo) lo = s; if (s > hi) hi = s; }
+      if (lo === Infinity) continue;
+      let y0 = Math.round(mid - hi * amp), y1 = Math.round(mid - lo * amp);
+      if (prevY !== null) { if (prevY < y0) y0 = prevY + 1; else if (prevY > y1) y1 = prevY - 1; }
+      for (let y = clamp(y0, 0, DH - 1); y <= clamp(y1, 0, DH - 1); y++) drawDot(x, y, COL[tagOf(Math.abs(y - mid) / mid)]);
+      prevY = Math.round(mid - ((lo + hi) / 2) * amp);
+    }
+  } };
+
+// Mirror: braille spectrum bars reflected about the horizontal axis.
+MODES.mirror = { name: 'Mirror', bands: 10, fft: 2048,
+  render(bands) {
+    const DW = G.cols * 2, DH = G.rows * 4, half = DH / 2, levels = resampleLinear(bands, DW);
+    for (let x = 0; x < DW; x++) {
+      const n = Math.round(levels[x] * half);
+      for (let d = 0; d < n; d++) {
+        const c = COL[tagOf(d / half)];
+        drawDot(x, half - 1 - d, c); drawDot(x, half + d, c);
+      }
+    }
+  } };
+
+const MODE_KEYS = Object.keys(MODES);
+if (!MODES[S.mode]) S.mode = 'columns';
+
+// ---------- main loop ----------
+let running = false, target = null;
+function frame(now) {
+  if (!running) return;
+  requestAnimationFrame(frame);
+  const mode = MODES[S.mode];
+  const bandCount = typeof mode.bands === 'function' ? mode.bands() : mode.bands;
+  if (bandCount === 0) analyze(0, mode.fft);
+  else if (now - lastAnalyze >= TICK_ANALYZE || !target || target.length !== bandCount) { target = analyze(bandCount, mode.fft); lastAnalyze = now; }
+  let dt = lastSmooth ? (now - lastSmooth) / 1000 : 0;
+  if (dt > MAX_SMOOTH_DT) dt = 0.016;
+  lastSmooth = now;
+  ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--bg');
+  ctx.fillRect(0, 0, G.w, G.h);
+  const key = S.mode + ':' + bandCount;
+  mode.render(bandCount ? smoothed(key, target, dt) : null, dt);
+}
+
+// ---------- audio setup ----------
+async function startMic(deviceId) {
+  if (!navigator.mediaDevices?.getUserMedia) throw new Error('getUserMedia is not available here. Open this over http://localhost or https.');
+  const constraints = { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } };
+  if (deviceId) constraints.audio.deviceId = { exact: deviceId };
+  const stream = await navigator.mediaDevices.getUserMedia(constraints);
+  ensureContext();
+  stopSource();
+  audio.stream = stream;
+  audio.source = audio.ctx.createMediaStreamSource(stream);
+  audio.source.connect(audio.analyser);
+  await listDevices();
+}
+function ensureContext() {
+  if (audio.ctx) { audio.ctx.resume(); return; }
+  audio.ctx = new (window.AudioContext || window.webkitAudioContext)();
+  audio.analyser = audio.ctx.createAnalyser();
+  audio.analyser.fftSize = 2048;
+  audio.analyser.smoothingTimeConstant = 0;
+}
+function stopSource() {
+  if (audio.source) { try { audio.source.disconnect(); } catch (e) {} audio.source = null; }
+  if (audio.stream) { audio.stream.getTracks().forEach(t => t.stop()); audio.stream = null; }
+  if (audio.demo) { audio.demo.stop(); audio.demo = null; }
+}
+function startDemo() {
+  ensureContext(); stopSource();
+  const c = audio.ctx, out = c.createGain(); out.gain.value = 0.5; out.connect(audio.analyser);
+  const nodes = [];
+  const kick = c.createOscillator(), kg = c.createGain(); kick.type = 'sine'; kick.connect(kg); kg.connect(out); kick.start(); nodes.push(kick);
+  const bass = c.createOscillator(), bg = c.createGain(); bass.type = 'sawtooth'; bass.frequency.value = 55; bg.gain.value = 0.25; bass.connect(bg); bg.connect(out); bass.start(); nodes.push(bass);
+  const lead = c.createOscillator(), lg = c.createGain(); lead.type = 'square'; lg.gain.value = 0.08; lead.connect(lg); lg.connect(out); lead.start(); nodes.push(lead);
+  const nb = c.createBuffer(1, c.sampleRate * 2, c.sampleRate), d = nb.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  const noise = c.createBufferSource(), ng = c.createGain(), hp = c.createBiquadFilter();
+  noise.buffer = nb; noise.loop = true; hp.type = 'highpass'; hp.frequency.value = 6000; ng.gain.value = 0;
+  noise.connect(hp); hp.connect(ng); ng.connect(out); noise.start(); nodes.push(noise);
+  const scale = [220, 261.6, 293.7, 329.6, 392, 440, 523.3];
+  const t0 = c.currentTime, beat = 60 / 124;
+  let timer = setInterval(() => {
+    const t = c.currentTime + 0.05;
+    kick.frequency.setValueAtTime(150, t); kick.frequency.exponentialRampToValueAtTime(40, t + 0.12);
+    kg.gain.setValueAtTime(0.9, t); kg.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
+    ng.gain.setValueAtTime(0.35, t + beat / 2); ng.gain.exponentialRampToValueAtTime(0.001, t + beat / 2 + 0.08);
+    lead.frequency.setValueAtTime(scale[Math.floor(Math.random() * scale.length)] * 2, t);
+    bass.frequency.setValueAtTime(Math.random() < 0.25 ? 82.4 : 55, t);
+  }, beat * 1000);
+  audio.demo = { stop() { clearInterval(timer); nodes.forEach(n => { try { n.stop(); } catch (e) {} }); out.disconnect(); } };
+  void t0;
+}
+async function listDevices() {
+  try {
+    const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput');
+    const sel = $('#device'); sel.innerHTML = '<option value="">default microphone</option>';
+    for (const d of devs) { const o = document.createElement('option'); o.value = d.deviceId; o.textContent = d.label || ('input ' + (sel.options.length)); sel.appendChild(o); }
+    sel.value = devs.some(d => d.deviceId === S.device) ? S.device : '';
+  } catch (e) {}
+}
+
+async function begin(fn) {
+  $('#err').textContent = '';
+  try { await fn(); } catch (e) { $('#err').textContent = e.message || String(e); return; }
+  $('#gate').classList.add('hidden');
+  audio.started = true;
+  if (!running) { running = true; lastSmooth = 0; requestAnimationFrame(frame); }
+  showUI();
+}
+
+// ---------- UI ----------
+function applyTheme() {
+  const t = THEMES[S.theme] || THEMES.gruvbox;
+  const r = document.documentElement.style;
+  for (const k of ['bg', 'fg', 'dim', 'low', 'mid', 'high']) r.setProperty('--' + k, t[k]);
+  COL = [t.low, t.mid, t.high];
+  document.querySelector('meta[name=theme-color]')?.setAttribute('content', t.bg);
+}
+function syncGainUI() { $('#gain').value = Math.log10(S.gain); $('#gainv').textContent = S.gain.toFixed(1) + '×'; }
+function setMode(m) { S.mode = m; $('#mode').value = m; MODES[m].reset?.(); target = null; save(); }
+function cycleMode(dir) { setMode(MODE_KEYS[(MODE_KEYS.indexOf(S.mode) + dir + MODE_KEYS.length) % MODE_KEYS.length]); }
+function cycleTheme() { const ks = Object.keys(THEMES); S.theme = ks[(ks.indexOf(S.theme) + 1) % ks.length]; $('#theme').value = S.theme; applyTheme(); save(); }
+
+for (const k of MODE_KEYS) { const o = document.createElement('option'); o.value = k; o.textContent = MODES[k].name; $('#mode').appendChild(o); }
+for (const k of Object.keys(THEMES)) { const o = document.createElement('option'); o.value = k; o.textContent = k; $('#theme').appendChild(o); }
+$('#mode').value = S.mode; $('#theme').value = S.theme; $('#cell').value = S.cell; $('#auto').checked = S.auto; syncGainUI(); applyTheme();
+
+$('#mode').addEventListener('change', e => setMode(e.target.value));
+$('#theme').addEventListener('change', e => { S.theme = e.target.value; applyTheme(); save(); });
+$('#cell').addEventListener('input', e => { S.cell = +e.target.value; resize(); save(); });
+$('#gain').addEventListener('input', e => { S.gain = Math.pow(10, +e.target.value); S.auto = false; $('#auto').checked = false; syncGainUI(); save(); });
+$('#auto').addEventListener('change', e => { S.auto = e.target.checked; save(); });
+$('#device').addEventListener('change', async e => { S.device = e.target.value; save(); if (audio.started && !audio.demo) { try { await startMic(S.device); } catch (err) { console.error(err); } } });
+$('#fs').addEventListener('click', () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen());
+$('#start').addEventListener('click', () => begin(() => startMic(S.device)));
+$('#demo').addEventListener('click', () => { location.search = '?demo'; });
+// Autoplay policy fallback: if the context was created without a gesture, resume it on the first one.
+for (const ev of ['pointerdown', 'keydown']) window.addEventListener(ev, () => { if (audio.ctx?.state === 'suspended') audio.ctx.resume(); });
+
+let uiTimer = null, uiPinned = false;
+function showUI() {
+  document.body.classList.add('ui-visible');
+  clearTimeout(uiTimer);
+  if (!uiPinned) uiTimer = setTimeout(() => { if (!$('#ui').matches(':hover')) document.body.classList.remove('ui-visible'); }, 3000);
+}
+window.addEventListener('mousemove', showUI);
+$('#ui').addEventListener('mouseenter', () => clearTimeout(uiTimer));
+$('#ui').addEventListener('mouseleave', showUI);
+
+window.addEventListener('keydown', e => {
+  if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
+  switch (e.key) {
+    case 'ArrowRight': case 'v': cycleMode(1); break;
+    case 'ArrowLeft': cycleMode(-1); break;
+    case 't': cycleTheme(); break;
+    case '=': case '+': S.gain = clamp(S.gain * 1.25, 0.1, 100); S.auto = false; $('#auto').checked = false; syncGainUI(); save(); break;
+    case '-': S.gain = clamp(S.gain / 1.25, 0.1, 100); S.auto = false; $('#auto').checked = false; syncGainUI(); save(); break;
+    case ']': S.cell = clamp(S.cell + 1, 6, 48); $('#cell').value = S.cell; resize(); save(); break;
+    case '[': S.cell = clamp(S.cell - 1, 6, 48); $('#cell').value = S.cell; resize(); save(); break;
+    case 'f': $('#fs').click(); break;
+    case 'h': uiPinned = !uiPinned; if (uiPinned) showUI(); else document.body.classList.remove('ui-visible'); return;
+    case 'Enter': if (!audio.started) $('#start').click(); return;
+    default: return;
+  }
+  showUI();
+});
+
+window.addEventListener('resize', resize);
+resize();
+if (new URLSearchParams(location.search).has('demo')) begin(async () => startDemo());
+</script>
+</body>
+</html>
