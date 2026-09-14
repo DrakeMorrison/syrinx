@@ -5,6 +5,8 @@ terminal visualizer. Single `index.html`, no dependencies, no build.
 
 ## Run
 
+Live at <https://drakemorrison.github.io/syrinx/>, or run it locally:
+
 Open `index.html` in Chrome or Firefox and click **start microphone**. If the browser
 refuses mic access from a `file://` URL, serve it instead:
 
