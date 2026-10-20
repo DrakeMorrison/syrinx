@@ -448,8 +448,9 @@ MODES.mirror = { name: 'Mirror', bands: 10, fft: 2048,
     }
   } };
 
-// Ferrofluid: a magnetised blob that grows Rosensweig spikes above a field threshold. Each spike is an
-// underdamped spring chasing its band (bass at the bottom, treble at the top, mirrored left/right).
+// Ferrofluid: a matte, smoky ink mass in the spirit of Prey's mimics. A lumpy body sprouts a few long,
+// thin, curling tendrils that shed smoke. Each tendril is an underdamped spring chasing its band (bass at
+// the bottom, treble at the top, mirrored left/right), so loud hits make them lash out and twitch.
 // Drawn smooth rather than on the cell grid.
 const hexRgb = h => { const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
 const mixRgb = (a, b, t, al = 1) => { const x = hexRgb(a), y = hexRgb(b); return `rgba(${x.map((v, i) => Math.round(v + (y[i] - v) * t)).join(',')},${al})`; };
@@ -457,103 +458,110 @@ const mixRgb = (a, b, t, al = 1) => { const x = hexRgb(a), y = hexRgb(b); return
 MODES.ferro = { name: 'Ferrofluid', bands: 24, fft: 2048, state: null,
   reset() { this.state = null; },
   render(bands, dt) {
-    const TAU = Math.PI * 2, N = 30, M = 900, B = bands.length, gap = TAU / N, HALF = 0.72, SHARP = 2.4;
-    const K = 160, DAMP = 11, THRESH = 0.18, LX = -0.6, LY = -0.8;
+    const TAU = Math.PI * 2, N = 9, M = 200, K = 28, B = bands.length, gap = TAU / N;
+    const SPRING = 120, DAMP = 7, THRESH = 0.15, REST = 0.22, MAX_SMOKE = 500;
     let st = this.state;
-    if (!st) st = this.state = { h: new Float64Array(N), v: new Float64Array(N), t: 0, rot: 0,
-      phase: Float64Array.from({ length: N }, () => Math.random() * TAU), r: new Float64Array(M), e: new Float64Array(M), norm: new Float64Array(B).fill(0.3) };
-    st.t += dt; st.rot += dt * 0.05;
-    const th = THEMES[S.theme] || THEMES.gruvbox;
-    const cx = G.w / 2, cy = G.h / 2, R0 = Math.min(G.w, G.h) * 0.16, H = R0 * 1.5;
+    if (!st) st = this.state = { h: new Float64Array(N).fill(REST), v: new Float64Array(N), t: 0, rot: 0,
+      phase: Float64Array.from({ length: N }, () => Math.random() * TAU), norm: new Float64Array(B).fill(0.3), smoke: [] };
+    st.t += dt; st.rot += dt * 0.03;
+    const th = THEMES[S.theme] || THEMES.gruvbox, t = st.t;
+    const cx = G.w / 2, cy = G.h / 2, R0 = Math.min(G.w, G.h) * 0.09, H = R0 * 3.6;
     let bass = 0, energy = 0;
     for (let b = 0; b < B; b++) { energy += bands[b] / B; if (b < 3) bass += bands[b] / 3; }
-    // each band against its own slowly decaying peak, so quiet treble still raises spikes up top
+    // each band against its own slowly decaying peak, so quiet treble still moves the top tendrils
     const rel = new Float64Array(B);
     for (let b = 0; b < B; b++) { st.norm[b] = Math.max(bands[b], 0.3, st.norm[b] * Math.exp(-dt * 0.15)); rel[b] = bands[b] / st.norm[b]; }
 
-    // spike springs, substepped for stability, then a little surface tension between neighbours
+    // tendril springs, substepped for stability
     const steps = Math.ceil(dt * 240), sdt = steps ? dt / steps : 0;
     for (let i = 0; i < N; i++) {
-      let a = st.rot + i * gap - Math.PI / 2;               // angle from the bottom of the blob
+      let a = st.rot + i * gap - Math.PI / 2;               // angle from the bottom of the body
       a = Math.abs(Math.atan2(Math.sin(a), Math.cos(a))) / Math.PI;
-      const level = sampleLinear(rel, a * (B - 1));
-      let tgt = clamp((level - THRESH) / (1 - THRESH), 0, 1);
-      tgt = Math.pow(tgt, 1.3) * (0.82 + 0.18 * Math.sin(st.t * 1.7 + st.phase[i]));
+      const drive = Math.pow(clamp((sampleLinear(rel, a * (B - 1)) - THRESH) / (1 - THRESH), 0, 1), 1.3);
+      const tgt = (REST + (1 - REST) * drive) * (0.85 + 0.15 * Math.sin(t * 1.3 + st.phase[i]));
       for (let s = 0; s < steps; s++) {
-        st.v[i] += (K * (tgt - st.h[i]) - DAMP * st.v[i]) * sdt;
+        st.v[i] += (SPRING * (tgt - st.h[i]) - DAMP * st.v[i]) * sdt;
         st.h[i] += st.v[i] * sdt;
       }
-      if (st.h[i] < -0.04) { st.h[i] = -0.04; st.v[i] = 0; }
-    }
-    if (dt > 0) {
-      const h0 = Float64Array.from(st.h);
-      for (let i = 0; i < N; i++) st.h[i] += 0.06 * (h0[(i + N - 1) % N] + h0[(i + 1) % N] - 2 * h0[i]);
+      if (st.h[i] < 0.05) { st.h[i] = 0.05; st.v[i] = Math.max(0, st.v[i]); }
     }
 
-    // outline: wobbling base radius plus cusped cones (concave s^SHARP flanks meet in a point)
-    const baseAt = th0 => R0 * (1 + 0.1 * bass + 0.035 * Math.sin(2 * th0 + st.t * 0.8) + 0.025 * Math.sin(3 * th0 - st.t * 0.55 + 1));
+    // ink silhouette: a churning lumpy body plus tapered tendrils along curling centrelines
+    const ink = new Path2D(), tips = [];
+    const baseAt = a => R0 * (1 + 0.15 * bass + 0.08 * Math.sin(2 * a + t * 0.7) + 0.05 * Math.sin(3 * a - t * 0.5 + 1) + 0.03 * Math.sin(5 * a + t * 1.4 + 2));
     for (let j = 0; j < M; j++) {
-      const t0 = j / M * TAU;
-      let u = ((t0 - st.rot) / gap) % N; if (u < 0) u += N;
-      const i0 = Math.floor(u);
-      let sum = 0;
-      for (let k = i0; k <= i0 + 1; k++) { const s = 1 - Math.abs(u - k) / HALF; if (s > 0) sum += st.h[k % N] * Math.pow(s, SHARP); }
-      st.e[j] = sum; st.r[j] = baseAt(t0) + H * sum;
+      const a = j / M * TAU, r = baseAt(a);
+      if (j) ink.lineTo(cx + Math.cos(a) * r, cy + Math.sin(a) * r); else ink.moveTo(cx + r, cy);
     }
-    const px = j => cx + Math.cos(j / M * TAU) * st.r[j % M], py = j => cy + Math.sin(j / M * TAU) * st.r[j % M];
-    const outline = () => { ctx.beginPath(); ctx.moveTo(px(0), py(0)); for (let j = 1; j < M; j++) ctx.lineTo(px(j), py(j)); ctx.closePath(); };
-
-    // halo
-    let g = ctx.createRadialGradient(cx, cy, R0 * 0.8, cx, cy, R0 + H * 1.5);
-    g.addColorStop(0, mixRgb(COL[0], COL[0], 0, 0.06 + 0.22 * energy)); g.addColorStop(1, mixRgb(COL[0], COL[0], 0, 0));
-    ctx.fillStyle = g; ctx.fillRect(0, 0, G.w, G.h);
-
-    // body: near-black, faintly lit from the top left
-    outline();
-    g = ctx.createRadialGradient(cx - R0 * 0.35, cy - R0 * 0.4, 0, cx, cy, R0 + H);
-    g.addColorStop(0, mixRgb(th.bg, th.fg, 0.1)); g.addColorStop(0.45, mixRgb(th.bg, '#000000', 0.6)); g.addColorStop(1, mixRgb(th.bg, '#000000', 0.8));
-    ctx.fillStyle = g; ctx.fill();
-
-    ctx.save(); ctx.clip();
-    // specular and a coloured bounce light from below
-    g = ctx.createRadialGradient(cx - R0 * 0.38, cy - R0 * 0.45, 0, cx - R0 * 0.38, cy - R0 * 0.45, R0 * 0.45);
-    g.addColorStop(0, mixRgb(th.fg, th.fg, 0, 0.45)); g.addColorStop(1, mixRgb(th.fg, th.fg, 0, 0));
-    ctx.fillStyle = g; ctx.fillRect(cx - R0, cy - R0, R0 * 2, R0 * 2);
-    g = ctx.createRadialGradient(cx + R0 * 0.25, cy + R0 * 0.75, 0, cx + R0 * 0.25, cy + R0 * 0.75, R0 * 0.7);
-    g.addColorStop(0, mixRgb(COL[1], COL[1], 0, 0.1 + 0.25 * bass)); g.addColorStop(1, mixRgb(COL[1], COL[1], 0, 0));
-    ctx.fillStyle = g; ctx.fillRect(cx - R0 * 1.5, cy, R0 * 3, R0 * 2);
-    // a glint down the lit flank of each spike
-    ctx.lineWidth = Math.max(1, R0 * 0.012);
+    ink.closePath();
     for (let i = 0; i < N; i++) {
-      const h = st.h[i]; if (h < 0.05) continue;
-      const a = st.rot + i * gap, ndl = -Math.sin(a) * LX + Math.cos(a) * LY, side = ndl > 0 ? 1 : -1;
-      const rb = baseAt(a), pts = [];
-      for (let q = 0; q <= 10; q++) {
-        const u = 0.08 + q / 10 * 0.84, ang = a + side * 0.45 * HALF * (1 - Math.pow(u, 1 / SHARP)) * gap, rad = (rb + H * h * u) * 0.985;
-        pts.push(cx + Math.cos(ang) * rad, cy + Math.sin(ang) * rad);
+      const h = st.h[i], a0 = st.rot + i * gap, ph = st.phase[i], rb = baseAt(a0);
+      const len = H * h + rb * 0.4, seg = len / K, w0 = rb * 0.32;
+      const curl = 1.1 * Math.sin(t * 0.6 + ph) + clamp(0.06 * st.v[i], -0.8, 0.8);
+      let x = cx + Math.cos(a0) * rb * 0.6, y = cy + Math.sin(a0) * rb * 0.6, psi = a0;
+      const side1 = [], side2 = [];
+      for (let k = 0; k <= K; k++) {
+        const u = k / K;
+        psi = a0 + curl * u * u + 0.45 * u * Math.sin(t * 2.2 + ph * 1.7 - u * 6);
+        if (k) { x += Math.cos(psi) * seg; y += Math.sin(psi) * seg; }
+        const w = w0 * Math.pow(1 - u, 1.8) + 0.5, nx = Math.sin(psi) * w, ny = -Math.cos(psi) * w;
+        side1.push(x + nx, y + ny); side2.push(x - nx, y - ny);   // wound the same way as the body so nonzero fill merges them
       }
-      g = ctx.createLinearGradient(pts[0], pts[1], pts[20], pts[21]);
-      g.addColorStop(0, mixRgb(th.fg, th.fg, 0, 0)); g.addColorStop(0.65, mixRgb(th.fg, th.fg, 0, Math.min(0.7, Math.abs(ndl) * h * 0.9))); g.addColorStop(1, mixRgb(th.fg, th.fg, 0, 0));
-      ctx.strokeStyle = g; ctx.beginPath(); ctx.moveTo(pts[0], pts[1]);
-      for (let q = 2; q < pts.length; q += 2) ctx.lineTo(pts[q], pts[q + 1]);
-      ctx.stroke();
+      ink.moveTo(side1[0], side1[1]);
+      for (let q = 2; q < side1.length; q += 2) ink.lineTo(side1[q], side1[q + 1]);
+      for (let q = side2.length - 2; q >= 0; q -= 2) ink.lineTo(side2[q], side2[q + 1]);
+      ink.closePath();
+      tips.push({ x, y, psi, h, side1, side2 });
     }
-    ctx.restore();
 
-    // rim, then glowing spike edges coloured by height with the usual green / yellow / red zones
-    outline(); ctx.strokeStyle = mixRgb(th.bg, th.fg, 0.25); ctx.lineWidth = 1; ctx.stroke();
-    ctx.lineWidth = Math.max(1.5, R0 * 0.014); ctx.shadowBlur = R0 * 0.08;
-    let j = 0;
-    while (j < M) {
-      if (st.e[j] < 0.04) { j++; continue; }
-      const z = tagOf(st.e[j]);
-      ctx.beginPath(); ctx.moveTo(px(j - 1 + M), py(j - 1 + M));
-      while (j <= M && st.e[j % M] >= 0.04 && tagOf(st.e[j % M]) === z) { ctx.lineTo(px(j), py(j)); j++; }
-      ctx.lineTo(px(j), py(j));
-      ctx.strokeStyle = ctx.shadowColor = COL[z]; ctx.stroke();
-      if (j >= M) break;
+    // smoke: shed mostly from the outer half of each tendril, a little from the body, rising and spreading
+    const sm = st.smoke, sc = R0 / 60;
+    for (const tp of tips) {
+      let n = dt * (3 + 40 * tp.h * (0.3 + energy));
+      for (; n > 0 && sm.length < MAX_SMOKE; n--) {
+        if (n < 1 && Math.random() > n) break;
+        const k = Math.floor((0.4 + 0.6 * Math.random()) * K) * 2, sd = Math.random() < 0.5 ? tp.side1 : tp.side2;
+        const sp = (10 + 40 * Math.random()) * sc;
+        sm.push({ x: sd[k], y: sd[k + 1], vx: Math.cos(tp.psi) * sp * 0.4 + (Math.random() - 0.5) * 20 * sc,
+          vy: Math.sin(tp.psi) * sp * 0.4 + (Math.random() - 0.5) * 20 * sc, age: 0, life: 0.8 + Math.random() * 1.6, r: (3 + 5 * Math.random()) * sc });
+      }
     }
-    ctx.shadowBlur = 0;
+    if (Math.random() < dt * (8 + 30 * bass) && sm.length < MAX_SMOKE) {
+      const a = Math.random() * TAU, r = baseAt(a);
+      sm.push({ x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r, vx: Math.cos(a) * 15 * sc, vy: Math.sin(a) * 15 * sc, age: 0, life: 1.5 + Math.random(), r: 5 * sc });
+    }
+    const puffs = [new Path2D(), new Path2D(), new Path2D(), new Path2D()];
+    for (let i = sm.length - 1; i >= 0; i--) {
+      const p = sm[i];
+      p.age += dt;
+      if (p.age >= p.life) { sm[i] = sm[sm.length - 1]; sm.pop(); continue; }
+      const drag = Math.exp(-dt * 1.2);
+      p.vx *= drag; p.vy = p.vy * drag - 12 * sc * dt;
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      const f = p.age / p.life, r = p.r * (1 + 4 * f);
+      const pp = puffs[Math.min(3, Math.floor(f * 4))];
+      pp.moveTo(p.x + r, p.y); pp.arc(p.x, p.y, r, 0, TAU);
+    }
+
+    const inkCol = mixRgb(th.bg, '#000000', 0.88);
+    // the room darkens around it
+    let g = ctx.createRadialGradient(cx, cy, R0, cx, cy, R0 + H * 1.3);
+    g.addColorStop(0, mixRgb(th.bg, '#000000', 1, 0.25 + 0.2 * energy)); g.addColorStop(1, mixRgb(th.bg, '#000000', 1, 0));
+    ctx.fillStyle = g; ctx.fillRect(0, 0, G.w, G.h);
+    ctx.fillStyle = inkCol;
+    ctx.filter = `blur(${Math.max(3, R0 * 0.16)}px)`;
+    for (let q = 0; q < 4; q++) { ctx.globalAlpha = 0.5 * (1 - q / 4); ctx.fill(puffs[q]); }
+    // smoky fringe, then the body with only a slightly softened edge
+    ctx.filter = `blur(${Math.max(3, R0 * 0.15)}px)`; ctx.globalAlpha = 0.8; ctx.fill(ink);
+    ctx.filter = 'blur(1px)'; ctx.globalAlpha = 1; ctx.fill(ink);
+    // faint embers where the tendrils end, in the spectrum colours
+    for (const tp of tips) {
+      if (tp.h < 0.3) continue;
+      ctx.filter = `blur(${Math.max(2, R0 * 0.06)}px)`; ctx.globalAlpha = Math.min(0.7, (tp.h - 0.3) * 1.2);
+      ctx.fillStyle = COL[tagOf(tp.h)];
+      ctx.beginPath(); ctx.arc(tp.x, tp.y, Math.max(1.5, R0 * 0.05), 0, TAU); ctx.fill();
+    }
+    ctx.filter = 'none'; ctx.globalAlpha = 1;
   } };
 
 const MODE_KEYS = Object.keys(MODES);

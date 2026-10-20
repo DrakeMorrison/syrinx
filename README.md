@@ -18,10 +18,10 @@ and open <http://127.0.0.1:8765/>. The **demo signal** button (or `?demo` in the
 
 Columns (default), Bars, Ascii, ClassicPeak, ClassicLED, Wave, Mirror.
 
-Ferrofluid isn't from cliamp. It draws a glossy black blob that grows spikes once a band
-passes a threshold, the way ferrofluid does in a magnetic field. Bass drives the bottom of
-the blob and treble the top, mirrored left and right. Each spike is a springy oscillator, so
-it overshoots and wobbles. It's drawn smooth instead of on the cell grid.
+Ferrofluid isn't from cliamp. It's a matte, smoky ink creature in the spirit of the mimics
+from Prey (2017): a lumpy body with a few long, curling tendrils that shed smoke. Bass drives
+the bottom tendrils and treble the top, mirrored left and right. Each tendril is springy, so
+loud hits make it lash out and twitch. It's drawn smooth instead of on the cell grid.
 
 The spectrum pipeline is a port of cliamp's: 2048-point Hann-windowed FFT at ~30 Hz,
 ten log-spaced bands between 20 Hz and 20 kHz, its dB-to-level mapping, fast-attack /
